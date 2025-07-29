@@ -1,0 +1,141 @@
+services:
+  db:
+    image: ${SEAFILE_DB_IMAGE:-mariadb:10.11}
+    container_name: seafile-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${INIT_SEAFILE_MYSQL_ROOT_PASSWORD:?Variable is not set or empty}
+      - MYSQL_LOG_CONSOLE=true
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - ${SEAFILE_MYSQL_VOLUME:-/opt/seafile-mysql/db}:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh", "--connect", "--mariadbupgrade", "--innodb_initialized"]
+      interval: 20s
+      start_period: 30s
+      timeout: 5s
+      retries: 10
+    networks:
+      - seafile-net
+
+  memcached:
+    image: ${SEAFILE_MEMCACHED_IMAGE:-memcached:1.6.29}
+    container_name: seafile-memcached
+    entrypoint: memcached -m 256
+    networks:
+      - seafile-net
+
+  seafile:
+    image: ${SEAFILE_IMAGE:-seafileltd/seafile-mc:12.0-latest}
+    container_name: seafile
+    environment:
+      - DB_HOST=${SEAFILE_MYSQL_DB_HOST:-db}
+      - DB_PORT=${SEAFILE_MYSQL_DB_PORT:-3306}
+      - DB_USER=${SEAFILE_MYSQL_DB_USER:-seafile}
+      - DB_ROOT_PASSWD=${INIT_SEAFILE_MYSQL_ROOT_PASSWORD:?Variable is not set or empty}
+      - DB_PASSWORD=${SEAFILE_MYSQL_DB_PASSWORD:?Variable is not set or empty}
+      - SEAFILE_MYSQL_DB_CCNET_DB_NAME=${SEAFILE_MYSQL_DB_CCNET_DB_NAME:-ccnet_db}
+      - SEAFILE_MYSQL_DB_SEAFILE_DB_NAME=${SEAFILE_MYSQL_DB_SEAFILE_DB_NAME:-seafile_db}
+      - SEAFILE_MYSQL_DB_SEAHUB_DB_NAME=${SEAFILE_MYSQL_DB_SEAHUB_DB_NAME:-seahub_db}
+      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
+      - INIT_SEAFILE_ADMIN_EMAIL=${INIT_SEAFILE_ADMIN_EMAIL:-admin@example.com}
+      - INIT_SEAFILE_ADMIN_PASSWORD=${INIT_SEAFILE_ADMIN_PASSWORD:-your_secure_admin_password}
+      - SEAFILE_SERVER_HOSTNAME=${SEAFILE_SERVER_HOSTNAME:?Variable is not set or empty}
+      - SEAFILE_SERVER_PROTOCOL=${SEAFILE_SERVER_PROTOCOL:-http}
+      - SITE_ROOT=${SITE_ROOT:-/}
+      - NON_ROOT=${NON_ROOT:-false}
+      - JWT_PRIVATE_KEY=${JWT_PRIVATE_KEY:?Variable is not set or empty}
+      - SEAFILE_LOG_TO_STDOUT=${SEAFILE_LOG_TO_STDOUT:-false}
+      - ENABLE_SEADOC=${ENABLE_SEADOC:-true}
+      - SEADOC_SERVER_URL=${SEAFILE_SERVER_PROTOCOL:-http}://${SEAFILE_SERVER_HOSTNAME:?Variable is not set or empty}/sdoc-server
+    volumes:
+      - ${SEAFILE_VOLUME:-/opt/seafile-data}:/shared
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.seafile.rule=Host(`${SEAFILE_SERVER_HOSTNAME}`)"
+      - "traefik.http.routers.seafile.entrypoints=web"
+      - "traefik.http.services.seafile.loadbalancer.server.port=80"
+    depends_on:
+      db:
+        condition: service_healthy
+      memcached:
+        condition: service_started
+    networks:
+      - seafile-net
+
+  seadoc:
+    image: ${SEADOC_IMAGE:-seafileltd/sdoc-server:1.0-latest}
+    container_name: seadoc
+    environment:
+      - DB_HOST=${SEAFILE_MYSQL_DB_HOST:-db}
+      - DB_PORT=${SEAFILE_MYSQL_DB_PORT:-3306}
+      - DB_USER=${SEAFILE_MYSQL_DB_USER:-seafile}
+      - DB_PASSWORD=${SEAFILE_MYSQL_DB_PASSWORD:?Variable is not set or empty}
+      - DB_NAME=${SEADOC_MYSQL_DB_NAME:-seahub_db}
+      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
+      - JWT_PRIVATE_KEY=${JWT_PRIVATE_KEY:?Variable is not set or empty}
+      - NON_ROOT=${NON_ROOT:-false}
+      - SEAHUB_SERVICE_URL=${SEAFILE_SERVICE_URL:-http://seafile}
+    volumes:
+      - ${SEADOC_VOLUME:-/opt/seadoc-data}:/shared
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.seadoc.rule=Host(`${SEAFILE_SERVER_HOSTNAME}`) && PathPrefix(`/sdoc-server`)"
+      - "traefik.http.routers.seadoc.entrypoints=web"
+      - "traefik.http.services.seadoc.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.seadoc-strip.stripprefix.prefixes=/sdoc-server"
+      - "traefik.http.routers.seadoc.middlewares=seadoc-strip,seadoc-ws"
+      - "traefik.http.middlewares.seadoc-ws.headers.customrequestheaders.Connection=Upgrade"
+      - "traefik.http.middlewares.seadoc-ws.headers.customrequestheaders.Upgrade=websocket"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - seafile-net
+
+  traefik:
+    image: traefik:v3.1
+    container_name: seafile-traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+    ports:
+      - "7611:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${SEAFILE_TRAEFIK_VOLUME:-/opt/seafile-traefik}:/etc/traefik
+    networks:
+      - seafile-net
+
+networks:
+  seafile-net:
+    name: seafile-net
+    driver: bridge
+
+volumes:
+  seafile-mysql:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SEAFILE_MYSQL_VOLUME:-/opt/seafile-mysql/db}
+  seafile-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SEAFILE_VOLUME:-/opt/seafile-data}
+  seadoc-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SEADOC_VOLUME:-/opt/seadoc-data}
+  seafile-traefik:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SEAFILE_TRAEFIK_VOLUME:-/opt/seafile-traefik}
